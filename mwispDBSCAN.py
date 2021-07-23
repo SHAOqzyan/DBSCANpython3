@@ -1109,7 +1109,10 @@ class MWISPDBSCAN( object ):
                                 inputTB=None):
         """
 
+
+        Revisement: By qzyan for adding a noise cube for each individual clouds
         #output all data cubes for each cloud
+
         :return:
         """
 
@@ -1154,12 +1157,31 @@ class MWISPDBSCAN( object ):
         clusterValue1D = dataCluster[clusterIndex1D]
         Z0, Y0, X0 = clusterIndex1D
 
-        fitsZero = np.zeros_like(dataCluster, dtype=np.float32)
+        #### delete dataCLuster to recollect the memory
+        del dataCluster
+        gc.collect()
+        ####
+
+
+
+        fitsZero = np.zeros_like(dataCO, dtype=np.float32)
         fitsZero = fitsZero + noiseMask
+
+        noiseMaskZero  = np.zeros_like(dataCO, dtype=np.int)
+
+        noiseData= dataCO.copy()
+        noiseData[clusterIndex1D] = np.nan #all singla regions are masked
+
+        yxProj=np.zeros_like(dataCO[0,:,:],dtype=np.int )
+        zxProj=np.zeros_like(dataCO[:,0,:],dtype=np.int )
+        zyProj=np.zeros_like(dataCO[:,:,0],dtype=np.int )
+
+
         # print cloudTB.colnames
         for eachC in cloudTB:
             cloudID = eachC["_idx"]
             saveName = "cloud{}cube.fits".format(cloudID)
+            saveNameNoise = "cloud{}cube_noise.fits".format(cloudID)
 
             cloudIndex = self.getIndices(Z0, Y0, X0, clusterValue1D, cloudID)
             fitsZero[cloudIndex] = dataCO[cloudIndex]
@@ -1176,13 +1198,144 @@ class MWISPDBSCAN( object ):
             maxX = np.max(cloudX0)
 
             cropWCS = wcsCloud[minZ:maxZ + 1, minY:maxY + 1, minX:maxX + 1]
-
             cropData = fitsZero[minZ:maxZ + 1, minY:maxY + 1, minX:maxX + 1]
-
             fits.writeto(os.path.join(savePath,saveName), cropData, header=cropWCS.to_header(), overwrite=True)
 
-            fitsZero[:] = noiseMask
+
+            fitsZero[cloudIndex] = 1 # rest to maskfits
+
+
+            ####  deal Z axis
+            xyIndex= (Y0, X0)
+            yxProj[xyIndex] = 1
+            spectraIndicesYX = np.where(yxProj==1)
+
+            for i in range( len(spectraIndicesYX[0] ) ):
+
+                spectraYindex = spectraIndicesYX[0][i]
+                spectraXindex = spectraIndicesYX[1][i]
+
+
+                spectraMask = fitsZero[:,  spectraYindex,  spectraXindex  ]
+                expandMaskV = self.expandMask( spectraMask )
+                noiseMaskZero[ : ,  spectraYindex, spectraXindex ] =  noiseMaskZero[ : ,  spectraYindex, spectraXindex ]  + expandMaskV
+
+
+
+            ####  deal Y axis
+            zxIndex= (Z0, X0)
+            zxProj[zxIndex] = 1
+            spectraIndicesZX = np.where( zxProj==1 )
+
+
+            for i in range( len(spectraIndicesZX[0] )):
+                spectraZindex = spectraIndicesZX[0][i]
+                spectraXindex = spectraIndicesZX[1][i]
+
+                spectraMask = fitsZero[spectraZindex,  :,  spectraXindex  ]
+                expandMaskV = self.expandMask( spectraMask )
+                noiseMaskZero[ spectraZindex,  :,  spectraXindex ] = noiseMaskZero[ spectraZindex,  :,  spectraXindex ] + expandMaskV
+
+
+
+            ####  deal X axis
+            zyIndex= (Z0, Y0)
+            zyProj[zyIndex] = 1
+            spectraIndicesZY = np.where( zyProj==1 )
+
+
+            for i in range( len(  spectraIndicesZY[0] )):
+                spectraZindex = spectraIndicesZY[0][i]
+                spectraYindex = spectraIndicesZY[1][i]
+
+                spectraMask = fitsZero[spectraZindex, spectraYindex,  :  ]
+                expandMaskV = self.expandMask( spectraMask )
+                noiseMaskZero[ spectraZindex, spectraYindex,  : ] = noiseMaskZero[ spectraZindex, spectraYindex,  : ] + expandMaskV
+
+
+
+
+            ###crop the expanded mask regions
+
+            noiseMaskZero[cloudIndex] =0
+            noiseIndices = np.where(noiseMaskZero>0)
+
+            noiseZ0, noiseY0, noiseX0 = noiseIndices
+
+            minZnoise = np.min(noiseZ0)
+            maxZnoise = np.max(noiseZ0)
+
+            minYnoise = np.min(noiseY0)
+            maxYnoise = np.max(noiseY0)
+
+            minXnoise = np.min(noiseX0)
+            maxXnoise = np.max(noiseX0)
+
+            cropWCSnoise = wcsCloud[minZnoise:maxZnoise + 1, minYnoise:maxYnoise + 1, minXnoise:maxXnoise + 1]
+            cropDataNoise = noiseData[minZnoise:maxZnoise + 1, minYnoise:maxYnoise + 1, minXnoise:maxXnoise + 1]
+            cropDataNoise= cropDataNoise.copy()
+
+            cropNoiseMask =  noiseMaskZero[minZnoise:maxZnoise + 1, minYnoise:maxYnoise + 1, minXnoise:maxXnoise + 1]
+            cropDataNoise[cropNoiseMask==0] = np.nan
+
+
+            fits.writeto(os.path.join(savePath,saveNameNoise), cropDataNoise, header=cropWCSnoise.to_header(), overwrite=True)
+            del cropDataNoise
+            gc.collect( )
+
+
+
+            ### initialize
+            noiseMaskZero[:] = 0
+            fitsZero[:] = 0
+
+            yxProj[:] = 0
+            zxProj[:] = 0
+            zyProj[:] = 0
+
         print("Cloud fits writing done!")
+
+
+    def expandMask(self, spectraMask ):
+        """
+        extend the range of mask, the mask is actually the mask of single, expand this maks to close regions
+        :param range:
+        :param size:
+        :return:
+        """
+        signalMask = np.ma.masked_array(spectraMask,mask=spectraMask) #masked are regions
+        length = len(spectraMask)
+
+        signalRegions = np.ma.clump_masked( signalMask )
+
+        for eachRegion in signalRegions:
+
+            startI = eachRegion.start
+            endI= eachRegion.stop
+
+
+            sizeRegion = endI-startI
+
+
+            ##### back mask
+
+            backEnd= min([endI+sizeRegion,length-1] )
+            signalMask[endI:backEnd]=np.ma.masked
+
+            #### fore mask
+            foreStar=max([0, startI-sizeRegion] )
+            signalMask[foreStar:startI]=np.ma.masked
+
+
+        return signalMask.mask*1
+
+
+
+
+
+
+
+
 
     def getCloudIDByRow(self, eachC):
 
